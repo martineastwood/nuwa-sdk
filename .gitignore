@@ -1,0 +1,38 @@
+# Nim specific ignores
+nimcache/
+*.out
+*.exe
+*.dll
+*.so
+*.dylib
+*.a
+*.o
+*.js
+*.map
+
+# Nimble (common package manager)
+# Sometimes people build into a bin/ or build/ directory
+bin/
+build/
+
+# Documentation
+docs/html/
+htmldocs/
+
+# OS specific ignores
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Editors
+.vscode/
+*.code-workspace
+nuwa_sdk.code-workspace
+.idea/
+*.swp
+*.swo
+*~
