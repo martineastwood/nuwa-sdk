@@ -1,6 +1,6 @@
 # nuwa_sdk
 
-**Compile-time metadata generation for Nuwa Build**
+**Compile-time metadata generation for [Nuwa Build](https://github.com/martineastwood/nuwa-build)**
 
 This package provides the `nuwa_export` macro that enables automatic generation of Python type stubs (`.pyi` files) for Nim extensions built with Nuwa Build.
 
