@@ -1,4 +1,4 @@
-import macros, json, strutils
+import macros, json, strutils, hashes
 import nimpy
 
 proc mapTypeToPython(nimType: string): string =
@@ -25,7 +25,9 @@ proc mapTypeToPython(nimType: string): string =
     return "Any" # Fallback for unknown types
 
 macro nuwa_export*(prc: untyped): untyped =
-  ## Wraps nimpy's exportpy but also logs metadata for stub generation.
+  ## Wraps nimpy's exportpy but also generates metadata for stub generation.
+  ## If -d:nuwaStubDir=/tmp/path is set, writes JSON files there.
+  ## Otherwise, prints "NUWA_STUB:..." to stdout.
 
   # 1. Validate input is a proc
   prc.expectKind(nnkProcDef)
@@ -45,7 +47,7 @@ macro nuwa_export*(prc: untyped): untyped =
       elif stmt.kind == nnkEmpty:
         continue
       else:
-        break  # Stop at actual code
+        break # Stop at actual code
     docString = if docLines.len > 0: docLines.join("\n") else: ""
 
   # 3. Extract Parameters & Return Type
@@ -87,12 +89,27 @@ macro nuwa_export*(prc: untyped): untyped =
     "doc": docString
   }
 
-  # 5. Generate Compile-Time Echo (The "Hook")
-  # We use static: echo ... to print during compilation
-  let logStr = "NUWA_STUB:" & $payload
+  # Convert payload to string once to inject into quote block
+  let payloadStr = $payload
+
+  # 5. Generate Compile-Time Logger (The "Hook")
+  # We use static: ... to execute this during compilation
   let logger = quote do:
     static:
-      echo `logStr`
+      # Define the compile-time string flag.
+      # Defaults to empty string if not passed by nuwa-build.
+      const stubDir {.strdefine: "nuwaStubDir".}: string = ""
+      let pStr = `payloadStr`
+
+      if stubDir.len > 0:
+        # File-based mode: Write specific JSON file
+        # We hash the payload to ensure unique filenames for overloads
+        var h = hash(pStr)
+        let fname = stubDir & "/" & `funcName` & "_" & $h & ".json"
+        writeFile(fname, pStr)
+      else:
+        # Fallback/Legacy mode: Print to stdout
+        echo "NUWA_STUB:" & pStr
 
   # 6. Return standard nimpy export + our logger
   # Call nimpy's exportpy macro on the proc
