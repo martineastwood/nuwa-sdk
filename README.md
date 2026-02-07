@@ -1,4 +1,4 @@
-# nuwa_sdk
+# nuwa-sdk
 
 **Python interoperability utilities for [Nuwa Build](https://github.com/martineastwood/nuwa-build)**
 
