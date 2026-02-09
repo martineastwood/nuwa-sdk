@@ -1,8 +1,8 @@
 # Package
 
-version       = "0.3.0"
-author        = "Nuwa Build Contributors"
-description   = "SDK for Nuwa Build - provides compile-time metadata for Python stub generation"
+version       = "0.4.0"
+author        = "Martin Eastwood"
+description   = "SDK for Nuwa Build - provides compile-time metadata for Python stub generation and numpy array wrappers"
 license       = "MIT"
 srcDir        = "src"
 
@@ -10,3 +10,8 @@ srcDir        = "src"
 
 requires "nim >= 1.6.0"
 requires "nimpy >= 0.2.0"
+
+# Tests
+
+task test, "Run all tests":
+  exec "nim c -r --path:src tests/test_numpy.nim"

@@ -1,6 +1,7 @@
 import macros, json, strutils, hashes
 import nimpy
 import nimpy/py_lib
+import nimpy/raw_buffers
 import std/dynlib
 
 # =============================================================================
@@ -157,3 +158,218 @@ macro nuwa_export*(prc: untyped): untyped =
   result = quote do:
     `logger`
     `exportpyCall`
+
+# =============================================================================
+# NumPy Array Wrappers (RAII-based zero-copy access)
+# =============================================================================
+## This section provides ergonomic, RAII-based wrappers for numpy arrays.
+## The wrappers provide automatic cleanup, multi-dimensional indexing, and
+## integrate seamlessly with nuwa_export and withNogil.
+
+type
+  NumpyArrayRead*[T] = object
+    ## Read-only numpy array wrapper (any dimension)
+    ## Provides RAII cleanup and multi-dimensional indexing
+    buf: RawPyBuffer
+    owner*: PyObject
+    shape*: seq[int]
+    strides*: seq[int]
+
+  NumpyArrayWrite*[T] = object
+    ## Mutable numpy array wrapper (any dimension)
+    buf: RawPyBuffer
+    owner*: PyObject
+    shape*: seq[int]
+    strides*: seq[int]
+
+proc `=destroy`*[T](arr: NumpyArrayRead[T]) =
+  if arr.buf.buf != nil:
+    var buf = arr.buf
+    release(buf)
+
+proc `=destroy`*[T](arr: NumpyArrayWrite[T]) =
+  if arr.buf.buf != nil:
+    var buf = arr.buf
+    release(buf)
+
+proc close*[T](arr: var NumpyArrayRead[T]) {.inline.} =
+  `=destroy`(arr)
+
+proc close*[T](arr: var NumpyArrayWrite[T]) {.inline.} =
+  `=destroy`(arr)
+
+template asNumpyArray*(arr: PyObject, T: typedesc): NumpyArrayRead[T] =
+  ## Convert Python object to read-only numpy array wrapper
+  ## Usage: let npArr = arr.asNumpyArray(int64)
+  var result: NumpyArrayRead[T]
+  var buf: RawPyBuffer
+  let mode = cint(PyBUF_READ or PyBUF_CONTIG_RO)
+  getBuffer(arr, buf, mode)
+  result.buf = buf
+  result.owner = arr
+
+  # Extract shape
+  if result.buf.ndim == 0:
+    result.shape = @[result.buf.len div sizeof(T)]
+  else:
+    result.shape = newSeq[int](result.buf.ndim)
+    let shapePtr = cast[ptr UncheckedArray[clong]](result.buf.shape)
+    for i in 0..<result.buf.ndim:
+      result.shape[i] = int(shapePtr[i])
+  result
+
+template asNumpyArrayWrite*(arr: PyObject, T: typedesc): NumpyArrayWrite[T] =
+  ## Convert Python object to writable numpy array wrapper
+  ## Usage: let npArr = arr.asNumpyArrayWrite(float64)
+  var result: NumpyArrayWrite[T]
+  var buf: RawPyBuffer
+  let mode = cint(PyBUF_WRITE or PyBUF_CONTIG)
+  getBuffer(arr, buf, mode)
+  result.buf = buf
+  result.owner = arr
+
+  # Extract shape
+  if result.buf.ndim == 0:
+    result.shape = @[result.buf.len div sizeof(T)]
+  else:
+    result.shape = newSeq[int](result.buf.ndim)
+    let shapePtr = cast[ptr UncheckedArray[clong]](result.buf.shape)
+    for i in 0..<result.buf.ndim:
+      result.shape[i] = int(shapePtr[i])
+  result
+
+template asStridedArray*(arr: PyObject, T: typedesc): NumpyArrayRead[T] =
+  ## Force strided mode (for multi-dimensional or non-contiguous arrays)
+  ## Usage: let mat = arr.asStridedArray(float64)
+  var result: NumpyArrayRead[T]
+  var buf: RawPyBuffer
+  let mode = cint(PyBUF_READ or PyBUF_STRIDED_RO)
+  getBuffer(arr, buf, mode)
+  result.buf = buf
+  result.owner = arr
+
+  # Extract shape
+  if result.buf.ndim == 0:
+    result.shape = @[result.buf.len div sizeof(T)]
+  else:
+    result.shape = newSeq[int](result.buf.ndim)
+    let shapePtr = cast[ptr UncheckedArray[clong]](result.buf.shape)
+    for i in 0..<result.buf.ndim:
+      result.shape[i] = int(shapePtr[i])
+
+  # Extract strides
+  if result.buf.ndim > 0:
+    result.strides = newSeq[int](result.buf.ndim)
+    let stridesPtr = cast[ptr UncheckedArray[clong]](result.buf.strides)
+    for i in 0..<result.buf.ndim:
+      result.strides[i] = int(stridesPtr[i])
+  result
+
+proc len*[T](arr: NumpyArrayRead[T]): int {.inline.} =
+  result = 1
+  for dim in arr.shape:
+    result *= dim
+
+proc len*[T](arr: NumpyArrayWrite[T]): int {.inline.} =
+  result = 1
+  for dim in arr.shape:
+    result *= dim
+
+proc shape*[T](arr: NumpyArrayRead[T]): seq[int] {.inline.} =
+  arr.shape
+
+proc shape*[T](arr: NumpyArrayWrite[T]): seq[int] {.inline.} =
+  arr.shape
+
+proc data*[T](arr: NumpyArrayRead[T]): ptr UncheckedArray[T] {.inline.} =
+  cast[ptr UncheckedArray[T]](arr.buf.buf)
+
+proc data*[T](arr: NumpyArrayWrite[T]): ptr UncheckedArray[T] {.inline.} =
+  cast[ptr UncheckedArray[T]](arr.buf.buf)
+
+proc `[]`*[T](arr: NumpyArrayRead[T], indices: varargs[int]): T {.inline.} =
+  if arr.strides.len == 0:
+    # 1D contiguous
+    let data = cast[ptr UncheckedArray[T]](arr.buf.buf)
+    return data[indices[0]]
+  else:
+    # Multi-dimensional with strides
+    var offset = 0
+    for i in 0..<arr.shape.len:
+      let strideElements = arr.strides[i] div sizeof(T)
+      offset += indices[i] * strideElements
+
+    let data = cast[ptr UncheckedArray[T]](arr.buf.buf)
+    return data[offset]
+
+proc `[]`*[T](arr: NumpyArrayWrite[T], indices: varargs[int]): T {.inline.} =
+  if arr.strides.len == 0:
+    # 1D contiguous
+    let data = cast[ptr UncheckedArray[T]](arr.buf.buf)
+    return data[indices[0]]
+  else:
+    # Multi-dimensional with strides
+    var offset = 0
+    for i in 0..<arr.shape.len:
+      let strideElements = arr.strides[i] div sizeof(T)
+      offset += indices[i] * strideElements
+
+    let data = cast[ptr UncheckedArray[T]](arr.buf.buf)
+    return data[offset]
+
+proc `[]=`*[T](arr: NumpyArrayWrite[T], indices: varargs[int], val: T) {.inline.} =
+  if arr.strides.len == 0:
+    # 1D contiguous
+    let data = cast[ptr UncheckedArray[T]](arr.buf.buf)
+    data[indices[0]] = val
+  else:
+    # Multi-dimensional with strides
+    var offset = 0
+    for i in 0..<arr.shape.len:
+      let strideElements = arr.strides[i] div sizeof(T)
+      offset += indices[i] * strideElements
+
+    let data = cast[ptr UncheckedArray[T]](arr.buf.buf)
+    data[offset] = val
+
+iterator items*[T](arr: NumpyArrayRead[T]): T =
+  let data = cast[ptr UncheckedArray[T]](arr.buf.buf)
+  let total = arr.len
+  for i in 0..<total:
+    yield data[i]
+
+iterator items*[T](arr: NumpyArrayWrite[T]): T =
+  let data = cast[ptr UncheckedArray[T]](arr.buf.buf)
+  let total = arr.len
+  for i in 0..<total:
+    yield data[i]
+
+iterator mitems*[T](arr: NumpyArrayWrite[T]): var T =
+  let data = cast[ptr UncheckedArray[T]](arr.buf.buf)
+  let total = arr.len
+  for i in 0..<total:
+    yield data[i]
+
+iterator pairs*[T](arr: NumpyArrayRead[T]): tuple[idx: int, val: T] =
+  let data = cast[ptr UncheckedArray[T]](arr.buf.buf)
+  let total = arr.len
+  for i in 0..<total:
+    yield (i, data[i])
+
+proc ndim*[T](arr: NumpyArrayRead[T]): int {.inline.} =
+  arr.shape.len
+
+proc ndim*[T](arr: NumpyArrayWrite[T]): int {.inline.} =
+  arr.shape.len
+
+proc size*[T](arr: NumpyArrayRead[T]): int {.inline.} =
+  arr.len
+
+proc size*[T](arr: NumpyArrayWrite[T]): int {.inline.} =
+  arr.len
+
+proc isContiguous*[T](arr: NumpyArrayRead[T]): bool {.inline.} =
+  arr.strides.len == 0
+
+proc isContiguous*[T](arr: NumpyArrayWrite[T]): bool {.inline.} =
+  arr.strides.len == 0
