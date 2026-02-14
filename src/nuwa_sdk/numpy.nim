@@ -366,7 +366,7 @@ proc asNumpyArray*[T](arr: PyObject, writable: bool = false): NumpyArrayRead[T] 
   let mode = if writable: PyBUF_WRITE or PyBUF_STRIDED else: PyBUF_READ or PyBUF_STRIDED_RO
 
   var buf: RawPyBuffer
-  getBuffer(arr, buf, mode)
+  getBuffer(arr, buf, mode.cint)
 
   # Validate dtype
   validateDtype[T](buf)
@@ -409,7 +409,7 @@ proc asNumpyArrayWrite*[T](arr: PyObject): NumpyArrayWrite[T] =
   let mode = PyBUF_WRITE or PyBUF_STRIDED
 
   var buf: RawPyBuffer
-  getBuffer(arr, buf, mode)
+  getBuffer(arr, buf, mode.cint)
 
   # Validate dtype
   validateDtype[T](buf)
@@ -448,7 +448,7 @@ proc asStridedArray*[T](arr: PyObject, writable: static bool = false): auto =
     var result: NumpyArrayWrite[T]
     let mode = PyBUF_WRITE or PyBUF_STRIDED
     var buf: RawPyBuffer
-    getBuffer(arr, buf, mode)
+    getBuffer(arr, buf, mode.cint)
     validateDtype[T](buf)
     let shape = computeShape(buf)
     let itemSize = getItemSize[T](buf)
@@ -472,7 +472,7 @@ proc asStridedArray*[T](arr: PyObject, writable: static bool = false): auto =
     var result: NumpyArrayRead[T]
     let mode = PyBUF_READ or PyBUF_STRIDED_RO
     var buf: RawPyBuffer
-    getBuffer(arr, buf, mode)
+    getBuffer(arr, buf, mode.cint)
     validateDtype[T](buf)
     let shape = computeShape(buf)
     let itemSize = getItemSize[T](buf)
