@@ -260,9 +260,17 @@ template asStridedArray*(arr: PyObject, T: typedesc): NumpyArrayRead[T] =
   # Extract strides
   if result.buf.ndim > 0:
     result.strides = newSeq[int](result.buf.ndim)
-    let stridesPtr = cast[ptr UncheckedArray[clong]](result.buf.strides)
-    for i in 0..<result.buf.ndim:
-      result.strides[i] = int(stridesPtr[i])
+    if result.buf.strides.isNil:
+      # Compute default C-contiguous strides when not provided
+      var stride = sizeof(T)
+      for i in countdown(result.buf.ndim - 1, 0):
+        result.strides[i] = stride
+        let dim = if result.shape[i] > 0: result.shape[i] else: 1
+        stride *= dim
+    else:
+      let stridesPtr = cast[ptr UncheckedArray[clong]](result.buf.strides)
+      for i in 0..<result.buf.ndim:
+        result.strides[i] = int(stridesPtr[i])
   result
 
 proc len*[T](arr: NumpyArrayRead[T]): int {.inline.} =
