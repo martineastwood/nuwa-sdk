@@ -363,7 +363,10 @@ proc asNumpyArray*[T](arr: PyObject, writable: bool = false): NumpyArrayRead[T] 
   ##   for val in npArr:
   ##     echo val
 
-  let mode = if writable: PyBUF_WRITE or PyBUF_STRIDED else: PyBUF_READ or PyBUF_STRIDED_RO
+  let mode = if writable:
+    PyBUF_WRITE or PyBUF_STRIDED or PyBUF_FORMAT
+  else:
+    PyBUF_READ or PyBUF_STRIDED_RO or PyBUF_FORMAT
 
   var buf: RawPyBuffer
   getBuffer(arr, buf, mode.cint)
@@ -406,7 +409,7 @@ proc asNumpyArrayWrite*[T](arr: PyObject): NumpyArrayWrite[T] =
   ##   for i in 0..<npArr.len:
   ##     npArr[i] = npArr[i] * 2.0
 
-  let mode = PyBUF_WRITE or PyBUF_STRIDED
+  let mode = PyBUF_WRITE or PyBUF_STRIDED or PyBUF_FORMAT
 
   var buf: RawPyBuffer
   getBuffer(arr, buf, mode.cint)
@@ -446,7 +449,7 @@ proc asStridedArray*[T](arr: PyObject, writable: static bool = false): auto =
 
   when writable:
     var result: NumpyArrayWrite[T]
-    let mode = PyBUF_WRITE or PyBUF_STRIDED
+    let mode = PyBUF_WRITE or PyBUF_STRIDED or PyBUF_FORMAT
     var buf: RawPyBuffer
     getBuffer(arr, buf, mode.cint)
     validateDtype[T](buf)
@@ -470,7 +473,7 @@ proc asStridedArray*[T](arr: PyObject, writable: static bool = false): auto =
     return result
   else:
     var result: NumpyArrayRead[T]
-    let mode = PyBUF_READ or PyBUF_STRIDED_RO
+    let mode = PyBUF_READ or PyBUF_STRIDED_RO or PyBUF_FORMAT
     var buf: RawPyBuffer
     getBuffer(arr, buf, mode.cint)
     validateDtype[T](buf)

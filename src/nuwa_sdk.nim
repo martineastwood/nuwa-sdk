@@ -203,7 +203,7 @@ template asNumpyArray*(arr: PyObject, T: typedesc): NumpyArrayRead[T] =
   ## Usage: let npArr = arr.asNumpyArray(int64)
   var result: NumpyArrayRead[T]
   var buf: RawPyBuffer
-  let mode = cint(PyBUF_READ or PyBUF_CONTIG_RO)
+  let mode = cint(PyBUF_READ or PyBUF_CONTIG_RO or PyBUF_FORMAT)
   getBuffer(arr, buf, mode)
   result.buf = buf
   result.owner = arr
@@ -223,7 +223,7 @@ template asNumpyArrayWrite*(arr: PyObject, T: typedesc): NumpyArrayWrite[T] =
   ## Usage: let npArr = arr.asNumpyArrayWrite(float64)
   var result: NumpyArrayWrite[T]
   var buf: RawPyBuffer
-  let mode = cint(PyBUF_WRITE or PyBUF_CONTIG)
+  let mode = cint(PyBUF_WRITE or PyBUF_CONTIG or PyBUF_FORMAT)
   getBuffer(arr, buf, mode)
   result.buf = buf
   result.owner = arr
@@ -243,7 +243,7 @@ template asStridedArray*(arr: PyObject, T: typedesc): NumpyArrayRead[T] =
   ## Usage: let mat = arr.asStridedArray(float64)
   var result: NumpyArrayRead[T]
   var buf: RawPyBuffer
-  let mode = cint(PyBUF_READ or PyBUF_STRIDED_RO)
+  let mode = cint(PyBUF_READ or PyBUF_STRIDED_RO or PyBUF_FORMAT)
   getBuffer(arr, buf, mode)
   result.buf = buf
   result.owner = arr
