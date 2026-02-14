@@ -213,7 +213,7 @@ template asNumpyArray*(arr: PyObject, T: typedesc): NumpyArrayRead[T] =
     result.shape = @[result.buf.len div sizeof(T)]
   else:
     result.shape = newSeq[int](result.buf.ndim)
-    let shapePtr = cast[ptr UncheckedArray[clong]](result.buf.shape)
+    let shapePtr = cast[ptr UncheckedArray[Py_ssize_t]](result.buf.shape)
     for i in 0..<result.buf.ndim:
       result.shape[i] = int(shapePtr[i])
   result
@@ -233,7 +233,7 @@ template asNumpyArrayWrite*(arr: PyObject, T: typedesc): NumpyArrayWrite[T] =
     result.shape = @[result.buf.len div sizeof(T)]
   else:
     result.shape = newSeq[int](result.buf.ndim)
-    let shapePtr = cast[ptr UncheckedArray[clong]](result.buf.shape)
+    let shapePtr = cast[ptr UncheckedArray[Py_ssize_t]](result.buf.shape)
     for i in 0..<result.buf.ndim:
       result.shape[i] = int(shapePtr[i])
   result
@@ -253,7 +253,7 @@ template asStridedArray*(arr: PyObject, T: typedesc): NumpyArrayRead[T] =
     result.shape = @[result.buf.len div sizeof(T)]
   else:
     result.shape = newSeq[int](result.buf.ndim)
-    let shapePtr = cast[ptr UncheckedArray[clong]](result.buf.shape)
+    let shapePtr = cast[ptr UncheckedArray[Py_ssize_t]](result.buf.shape)
     for i in 0..<result.buf.ndim:
       result.shape[i] = int(shapePtr[i])
 
@@ -268,7 +268,7 @@ template asStridedArray*(arr: PyObject, T: typedesc): NumpyArrayRead[T] =
         let dim = if result.shape[i] > 0: result.shape[i] else: 1
         stride *= dim
     else:
-      let stridesPtr = cast[ptr UncheckedArray[clong]](result.buf.strides)
+      let stridesPtr = cast[ptr UncheckedArray[Py_ssize_t]](result.buf.strides)
       for i in 0..<result.buf.ndim:
         result.strides[i] = int(stridesPtr[i])
   result
