@@ -6,6 +6,7 @@ This package provides utilities for building high-performance Python extensions 
 
 - **`nuwa_export`** - Macro for automatic generation of Python type stubs (`.pyi` files)
 - **`withNogil`** - Template for releasing the Python GIL during pure Nim code execution
+- **`asNumpyArray` / `asNumpyArrayWrite`** - Zero-copy views of existing NumPy (or other PEP 3118) buffers. This does not allocate ndarrays.
 
 ## Usage
 
@@ -67,6 +68,34 @@ proc computePi(iterations: int): float {.nuwa_export.} =
 3. `PyEval_RestoreThread()` reacquires the GIL before returning to Python
 
 Equivalent to Cython's `with nogil:` block or CPython's `Py_BEGIN_ALLOW_THREADS`.
+
+## NumPy / buffer views
+
+`asNumpyArray` wraps an existing Python object that exports the buffer protocol (typically a NumPy array). It does **not** create arrays or copy data.
+
+```nim
+import nuwa_sdk
+
+proc sumInt64(arr: PyObject): int64 {.nuwa_export.} =
+  var view = asNumpyArray(arr, int64)
+  result = 0
+  for x in view:
+    result += x
+
+proc scaleInPlace(arr: PyObject, s: float64) {.nuwa_export.} =
+  var view = asNumpyArrayWrite(arr, float64)
+  for x in mitems(view):
+    x = x * s
+```
+
+- Use a concrete element type (`int64`, `float64`, …), not a generic `ndarray`.
+- `isContiguous` means **C-order**. Fortran-contiguous arrays still expose `data` (memory order is column-major).
+- `arr[i]` is only for **1D** arrays. Use `arr[i, j]` for 2D.
+- `items` walks logical C-order even when storage is Fortran.
+- Read-only arrays (`setflags(write=False)`) work with `asNumpyArray` and fail with `asNumpyArrayWrite`.
+- `close()` is optional (RAII releases the buffer) and requires `var`, not `let`.
+
+See [NumPy buffers](https://martineastwood.github.io/nuwa-docs/nuwa-sdk/numpy/).
 
 ## How It Works
 

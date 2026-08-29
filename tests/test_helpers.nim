@@ -107,7 +107,7 @@ proc test_indexing_2d*(arr: PyObject): seq[seq[float64]] {.nuwa_export.} =
   for i in 0..<size:
     result[i] = @[mat[i, i]]
 
-proc test_iterator_items*(arr: PyObject): seq[int64] {.nu_export.} =
+proc test_iterator_items*(arr: PyObject): seq[int64] {.nuwa_export.} =
   ## Test helper: Test iteration via items iterator
   ## Verifies that the iterator works correctly
   var npArr = asNumpyArray(arr, int64)

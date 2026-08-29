@@ -1,6 +1,6 @@
 # Package
 
-version       = "0.4.3"
+version       = "0.4.4"
 author        = "Martin Eastwood"
 description   = "SDK for Nuwa Build - provides compile-time metadata for Python stub generation and numpy array wrappers"
 license       = "MIT"

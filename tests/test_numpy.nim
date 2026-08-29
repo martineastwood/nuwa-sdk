@@ -270,3 +270,63 @@ suite "Numpy Array Wrappers - Different Types":
     let npArr = asNumpyArray(arr, float32)
     check npArr.len == 3
     check npArr[0] == 1.5'f32
+
+suite "Numpy Array Wrappers - Layout and validation":
+  test "Fortran-contiguous 2D: data() works, isContiguous is C-only":
+    let np = pyImport("numpy")
+    let mat = np.array([[1.0, 2.0], [3.0, 4.0]], dtype="float64", order="F")
+    let npMat = asNumpyArray(mat, float64)
+    check npMat.ndim == 2
+    check npMat.isContiguous == false
+    check npMat.isFortranContiguous == true
+    let data = npMat.data
+    # Column-major: 1, 3, 2, 4
+    check data[0] == 1.0
+    check data[1] == 3.0
+    check data[2] == 2.0
+    check data[3] == 4.0
+    check npMat[0, 0] == 1.0
+    check npMat[1, 0] == 3.0
+    check npMat[0, 1] == 2.0
+    check npMat[1, 1] == 4.0
+
+  test "1D indexing on 2D C-contiguous array raises":
+    let np = pyImport("numpy")
+    let mat = np.array([[1, 2], [3, 4]], dtype="int64")
+    let npMat = asNumpyArray(mat, int64)
+    check npMat.isContiguous == true
+    expect DimensionError:
+      discard npMat[0]
+
+  test "reversed 1D view indexing":
+    let np = pyImport("numpy")
+    let arr = np.array([1, 2, 3, 4], dtype="int64")
+    let rev = np.flip(arr)
+    let npArr = asNumpyArray(rev, int64)
+    check npArr.len == 4
+    check npArr[0] == 4'i64
+    check npArr[1] == 3'i64
+    check npArr[3] == 1'i64
+    var seqVals: seq[int64] = @[]
+    for v in items(npArr):
+      seqVals.add(v)
+    check seqVals == @[4'i64, 3'i64, 2'i64, 1'i64]
+
+  test "dtype mismatch raises TypeError":
+    let np = pyImport("numpy")
+    let arr = np.array([1.0, 2.0], dtype="float64")
+    expect TypeError:
+      discard asNumpyArray(arr, int64)
+
+  test "writable wrap fails on write-protected array":
+    let np = pyImport("numpy")
+    let arr = np.array([1.0, 2.0, 3.0], dtype="float64")
+    discard arr.setflags(write=false)
+    let readArr = asNumpyArray(arr, float64)
+    check readArr.len == 3
+    var raised = false
+    try:
+      discard asNumpyArrayWrite(arr, float64)
+    except CatchableError:
+      raised = true
+    check raised == true
