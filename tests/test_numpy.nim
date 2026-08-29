@@ -10,6 +10,7 @@
 import unittest
 import nimpy
 import std/sequtils
+import std/math
 include nuwa_sdk
 
 suite "Numpy Array Wrappers - Basic Operations":
@@ -171,22 +172,18 @@ suite "Numpy Array Wrappers - Type Conversion":
     let arr = np.array([1, 2, 3, 4], dtype="int64")
 
     let npArr = asNumpyArray(arr, int64)
-    let view = toOpenArray(npArr)
-
-    check sum(view) == 10'i64
+    # toOpenArray provides a zero-copy view compatible with std algorithms
+    check sum(toOpenArray(npArr)) == 10'i64
 
   test "toOpenArray writable view":
     let np = pyImport("numpy")
     let arr = np.array([1, 2, 3], dtype="int64")
 
     let npArr = asNumpyArrayWrite(arr, int64)
-    var view = toOpenArray(npArr)
 
-    proc scale(a: var openArray[int64]) =
-      for i in 0..<a.len:
-        a[i] = a[i] * 2
-
-    scale(view)
+    # Use mitems iterator to modify elements through the wrapper
+    for val in mitems(npArr):
+      val = val * 2
 
     check npArr[0] == 2'i64
     check npArr[1] == 4'i64
@@ -200,20 +197,17 @@ suite "Numpy Array Wrappers - Utility Functions":
     let npArr1d = asNumpyArray(arr1d, int64)
     check npArr1d.isContiguous == true
 
+    # Create a non-contiguous array by taking a transpose or slice
     let mat = np.array([[1, 2], [3, 4]], dtype="int64")
-    let npMat = asStridedArray(mat, int64)
-    # 2D arrays created with np.array are typically contiguous
-    # but we're forcing strided mode
+    let matT = mat.T  # Transpose creates a non-contiguous view
+    let npMat = asStridedArray(matT, int64)
     check npMat.isContiguous == false
 
 suite "Numpy Array Wrappers - withNogil Integration":
   test "GIL release with data pointer":
     let np = pyImport("numpy")
-    # Create a simple array for testing
-    let data_list = newSeq[int](100)
-    for i in 0..<100:
-      data_list[i] = i
-    let arr = np.array(data_list, dtype="float64")
+    # Create array using numpy's arange
+    let arr = np.arange(100, dtype="float64")
 
     let npArr = asNumpyArray(arr, float64)
     let n = npArr.len
@@ -228,12 +222,13 @@ suite "Numpy Array Wrappers - withNogil Integration":
       for i in 0..<n:
         sum += data[i]
 
+    # Sum of 0-99 is 4950
     check abs(sum - 4950.0) < 0.01
 
 suite "Numpy Array Wrappers - Edge Cases":
   test "Empty array":
     let np = pyImport("numpy")
-    let arr = np.array([], dtype="int64")
+    let arr = np.arange(0, dtype="int64")  # Creates empty array
 
     let npArr = asNumpyArray(arr, int64)
     check npArr.len == 0
@@ -248,11 +243,8 @@ suite "Numpy Array Wrappers - Edge Cases":
 
   test "Large array iteration":
     let np = pyImport("numpy")
-    # Use a smaller large array for testing
-    let data_list = newSeq[int](1000)
-    for i in 0..<1000:
-      data_list[i] = i
-    let arr = np.array(data_list, dtype="int64")
+    # Use numpy's arange to create array
+    let arr = np.arange(1000, dtype="int64")
 
     let npArr = asNumpyArray(arr, int64)
 

@@ -21,11 +21,11 @@ proc greet(name: string): string {.nuwa_export.} =
   return "Hello, " & name
 ```
 
-When you build your project with `nuwa build`, this macro will:
+When you build your project with `nuwa develop` or `nuwa build`, this macro will:
 
 1. Export the function to Python (via `nimpy`)
-2. Emit compile-time metadata about function signatures
-3. Enable automatic generation of `.pyi` stub files
+2. Write compile-time metadata about function signatures (JSON files when `-d:nuwaStubDir=` is set, otherwise `NUWA_STUB:` lines on stdout)
+3. Let **nuwa-build** generate `.pyi` stub files from that metadata
 
 ## GIL Release with `withNogil`
 
@@ -75,8 +75,9 @@ Equivalent to Cython's `with nogil:` block or CPython's `Py_BEGIN_ALLOW_THREADS`
 - Inspects your Nim functions at compile time
 - Extracts parameter names, types, return types, and docstrings
 - Maps Nim types to Python type annotations
-- Outputs JSON metadata to the compiler's stdout
-- The `nuwa_build` Python tool captures this output and generates `.pyi` files
+- Writes JSON metadata to `-d:nuwaStubDir=` when nuwa-build provides that path
+- Falls back to `NUWA_STUB:` lines on stdout
+- **nuwa-build** reads that metadata and generates `.pyi` files
 
 ### `withNogil` template
 

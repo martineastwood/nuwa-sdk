@@ -36,4 +36,8 @@ nuwa_sdk.code-workspace
 *.swp
 *.swo
 *~
-notes/
+# Compiled test binaries (nim c -r writes next to the .nim file)
+tests/test_minimal
+tests/test_simple
+tests/test_numpy
+tests/test_helpers

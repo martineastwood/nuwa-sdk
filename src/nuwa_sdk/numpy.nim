@@ -91,6 +91,7 @@ type
 
 proc getDtypeCode[T](): char =
   ## Get numpy dtype code for Nim type T
+  ## Compile-time error for unsupported types
   when T is int8:
     return 'b'
   elif T is int16:
@@ -114,15 +115,24 @@ proc getDtypeCode[T](): char =
   elif T is bool:
     return '?'
   else:
-    return '\0'
+    {.error: "Unsupported type for numpy array: " & $T &
+            ". Supported types: int8, int16, int32, int64, uint8, uint16, uint32, uint64, float32, float64, bool.".}
 
-proc parseFormat(format: string, code: var char, size: var int, hasSize: var bool): bool =
+proc parseFormat(
+  format: string,
+  endian: var char,
+  code: var char,
+  size: var int,
+  hasSize: var bool
+): bool =
   ## Parse a PEP 3118-style format string with optional endianness.
   ## Returns false if the format is not a simple scalar code.
   if format.len == 0:
     return false
   var i = 0
+  endian = '@'
   if format[0] in {'@', '=', '<', '>', '!', '|'}:
+    endian = format[0]
     i.inc
   if i >= format.len:
     return false
@@ -169,21 +179,32 @@ proc isUnsignedIntCode(code: char): bool =
 proc isFloatCode(code: char): bool =
   code in {'f', 'd', 'g'}
 
+proc isNativeEndian(endian: char): bool =
+  case endian
+  of '@', '=', '|':
+    true
+  of '<':
+    cpuEndian == littleEndian
+  of '>', '!':
+    cpuEndian == bigEndian
+  else:
+    false
+
 proc validateDtype[T](buf: RawPyBuffer) =
   ## Validate that buffer format matches expected dtype
+  ## Note: getDtypeCode[T]() will produce a compile-time error for unsupported types
   let expectedCode = getDtypeCode[T]()
-  if expectedCode == '\0':
-    return  # Skip validation for unsupported types
 
   let actual = if buf.format.isNil: "" else: $buf.format
   if actual.len == 0:
     raise newException(TypeError,
       "Array dtype mismatch: expected '" & $expectedCode & "' but buffer has no format")
 
+  var endian: char
   var code: char
   var size: int
   var hasSize: bool
-  let parsed = parseFormat(actual, code, size, hasSize)
+  let parsed = parseFormat(actual, endian, code, size, hasSize)
   if not parsed:
     # Fallback for simple one-character formats
     if actual.len == 1 and actual[0] == expectedCode:
@@ -198,6 +219,9 @@ proc validateDtype[T](buf: RawPyBuffer) =
   if actualSize == 0 or actualSize != expectedSize:
     raise newException(TypeError,
       "Array dtype mismatch: expected size " & $expectedSize & " but got '" & actual & "'")
+  if expectedSize > 1 and not isNativeEndian(endian):
+    raise newException(TypeError,
+      "Array dtype mismatch: expected native-endian '" & $expectedCode & "' but got '" & actual & "'")
 
   when T is bool:
     if code != '?':
@@ -228,10 +252,11 @@ proc computeShape(buf: RawPyBuffer): seq[int] =
 
 proc itemSizeFromFormat(format: string): int =
   ## Best-effort element size from format string.
+  var endian: char
   var code: char
   var size: int
   var hasSize: bool
-  if parseFormat(format, code, size, hasSize):
+  if parseFormat(format, endian, code, size, hasSize):
     if hasSize:
       return size
     return codeSize(code)
@@ -277,6 +302,7 @@ proc computeStrides(buf: RawPyBuffer, shape: seq[int], itemSize: int): seq[int] 
 
 proc isCContiguous(shape: seq[int], strides: seq[int], itemSize: int): bool =
   ## Check if array is C-contiguous (row-major)
+  ## Size-1 dimensions (singletons) are stride-flexible per NumPy semantics
   if shape.len <= 1:
     if shape.len == 0:
       return true
@@ -287,14 +313,16 @@ proc isCContiguous(shape: seq[int], strides: seq[int], itemSize: int): bool =
 
   var expectedStride = itemSize
   for i in countdown(shape.len - 1, 0):
-    if strides[i] != expectedStride:
+    # Size-1 dimensions can have any stride (NumPy compatibility)
+    if shape[i] != 1 and strides[i] != expectedStride:
       return false
-    if shape[i] > 0:
+    if shape[i] > 1:
       expectedStride *= shape[i]
   return true
 
 proc isFortranContiguous(shape: seq[int], strides: seq[int], itemSize: int): bool =
   ## Check if array is Fortran-contiguous (column-major)
+  ## Size-1 dimensions (singletons) are stride-flexible per NumPy semantics
   if shape.len <= 1:
     if shape.len == 0:
       return true
@@ -305,11 +333,26 @@ proc isFortranContiguous(shape: seq[int], strides: seq[int], itemSize: int): boo
 
   var expectedStride = itemSize
   for i in 0..<shape.len:
-    if strides[i] != expectedStride:
+    # Size-1 dimensions can have any stride (NumPy compatibility)
+    if shape[i] != 1 and strides[i] != expectedStride:
       return false
-    if shape[i] > 0:
+    if shape[i] > 1:
       expectedStride *= shape[i]
   return true
+
+proc getStrideElements(stride: int, itemSize: int, dimIdx: int): int =
+  ## Convert byte stride to element stride with validation
+  ## Strides must be aligned to element size for proper indexing
+  when defined(debug):
+    if itemSize > 0 and (stride mod itemSize != 0):
+      raise newException(LayoutError,
+        "Stride " & $stride & " for dimension " & $dimIdx &
+        " is not aligned to element size " & $itemSize)
+
+  if itemSize > 0:
+    result = stride div itemSize
+  else:
+    result = 0
 
 # =============================================================================
 # RAII Cleanup (Destructors)
@@ -317,29 +360,79 @@ proc isFortranContiguous(shape: seq[int], strides: seq[int], itemSize: int): boo
 
 proc `=destroy`*[T](arr: NumpyArrayRead[T]) =
   ## Automatic cleanup when read-only array goes out of scope
-  when defined(debug):
-    # Can't modify in destructor
-    discard
+  ## Note: arr is passed by value, so we can't modify the original.
+  ## The object will be gone after this proc returns.
   if arr.buf.buf != nil:
     var buf = arr.buf
     release(buf)
 
 proc `=destroy`*[T](arr: NumpyArrayWrite[T]) =
   ## Automatic cleanup when writable array goes out of scope
-  when defined(debug):
-    # Can't modify in destructor
-    discard
+  ## Note: arr is passed by value, so we can't modify the original.
+  ## The object will be gone after this proc returns.
   if arr.buf.buf != nil:
     var buf = arr.buf
     release(buf)
 
+proc `=copy`*[T](dest: var NumpyArrayRead[T], source: NumpyArrayRead[T]) {.error: "NumpyArrayRead cannot be copied (would cause double-free). Use `var arr2 = arr1` to move, or pass by ref.".}
+
+proc `=copy`*[T](dest: var NumpyArrayWrite[T], source: NumpyArrayWrite[T]) {.error: "NumpyArrayWrite cannot be copied (would cause double-free). Use `var arr2 = arr1` to move, or pass by ref.".}
+
+proc `=sink`*[T](dest: var NumpyArrayRead[T], source: NumpyArrayRead[T]) =
+  ## Move semantics - transfer ownership from source to dest
+  ## Source is an expiring value and won't be destroyed separately
+  if dest.buf.buf != nil:
+    release(dest.buf)
+
+  # Move all fields - source's destructor won't be called
+  dest.buf = source.buf
+  dest.owner = source.owner
+  dest.shape = source.shape
+  dest.strides = source.strides
+  dest.itemSize = source.itemSize
+  dest.isContiguous = source.isContiguous
+  dest.contiguousData = source.contiguousData
+  dest.contiguousLen = source.contiguousLen
+  when defined(debug):
+    dest.initialized = source.initialized
+
+proc `=sink`*[T](dest: var NumpyArrayWrite[T], source: NumpyArrayWrite[T]) =
+  ## Move semantics - transfer ownership from source to dest
+  ## Source is an expiring value and won't be destroyed separately
+  if dest.buf.buf != nil:
+    release(dest.buf)
+
+  # Move all fields - source's destructor won't be called
+  dest.buf = source.buf
+  dest.owner = source.owner
+  dest.shape = source.shape
+  dest.strides = source.strides
+  dest.itemSize = source.itemSize
+  dest.isContiguous = source.isContiguous
+  dest.contiguousData = source.contiguousData
+  dest.contiguousLen = source.contiguousLen
+  when defined(debug):
+    dest.initialized = source.initialized
+
 proc close*[T](arr: var NumpyArrayRead[T]) {.inline.} =
   ## Explicit cleanup (optional, RAII handles it automatically)
-  `=destroy`(arr)
+  if arr.buf.buf != nil:
+    release(arr.buf)
+    arr.buf.buf = nil
+  arr.contiguousData = nil
+  arr.contiguousLen = 0
+  when defined(debug):
+    arr.initialized = false
 
 proc close*[T](arr: var NumpyArrayWrite[T]) {.inline.} =
   ## Explicit cleanup (optional, RAII handles it automatically)
-  `=destroy`(arr)
+  if arr.buf.buf != nil:
+    release(arr.buf)
+    arr.buf.buf = nil
+  arr.contiguousData = nil
+  arr.contiguousLen = 0
+  when defined(debug):
+    arr.initialized = false
 
 # =============================================================================
 # Smart Constructor - tries contiguous fast path
@@ -371,26 +464,31 @@ proc asNumpyArray*[T](arr: PyObject, writable: bool = false): NumpyArrayRead[T] 
   var buf: RawPyBuffer
   getBuffer(arr, buf, mode.cint)
 
-  # Validate dtype
-  validateDtype[T](buf)
+  try:
+    # Validate dtype
+    validateDtype[T](buf)
 
-  let shape = computeShape(buf)
-  let itemSize = getItemSize[T](buf)
-  let strides = computeStrides(buf, shape, itemSize)
-  let contiguous = isCContiguous(shape, strides, itemSize)
+    let shape = computeShape(buf)
+    let itemSize = getItemSize[T](buf)
+    let strides = computeStrides(buf, shape, itemSize)
+    let contiguous = isCContiguous(shape, strides, itemSize)
 
-  result.buf = buf
-  result.owner = arr
-  result.shape = shape
-  result.strides = strides
-  result.itemSize = itemSize
-  result.isContiguous = contiguous
-  if contiguous:
-    result.contiguousData = cast[ptr UncheckedArray[T]](buf.buf)
-    result.contiguousLen = if itemSize > 0: buf.len div itemSize else: 0
+    result.buf = buf
+    result.owner = arr
+    result.shape = shape
+    result.strides = strides
+    result.itemSize = itemSize
+    result.isContiguous = contiguous
+    if contiguous:
+      result.contiguousData = cast[ptr UncheckedArray[T]](buf.buf)
+      result.contiguousLen = if itemSize > 0: buf.len div itemSize else: 0
 
-  when defined(debug):
-    result.initialized = true
+    when defined(debug):
+      result.initialized = true
+  except:
+    if buf.buf != nil:
+      release(buf)
+    raise
 
 proc asNumpyArrayWrite*[T](arr: PyObject): NumpyArrayWrite[T] =
   ## Convert Python object to writable numpy array wrapper
@@ -414,29 +512,34 @@ proc asNumpyArrayWrite*[T](arr: PyObject): NumpyArrayWrite[T] =
   var buf: RawPyBuffer
   getBuffer(arr, buf, mode.cint)
 
-  # Validate dtype
-  validateDtype[T](buf)
+  try:
+    # Validate dtype
+    validateDtype[T](buf)
 
-  let shape = computeShape(buf)
-  let itemSize = getItemSize[T](buf)
-  let strides = computeStrides(buf, shape, itemSize)
-  let contiguous = isCContiguous(shape, strides, itemSize)
+    let shape = computeShape(buf)
+    let itemSize = getItemSize[T](buf)
+    let strides = computeStrides(buf, shape, itemSize)
+    let contiguous = isCContiguous(shape, strides, itemSize)
 
-  result.buf = buf
-  result.owner = arr
-  result.shape = shape
-  result.strides = strides
-  result.itemSize = itemSize
-  result.isContiguous = contiguous
-  if contiguous:
-    result.contiguousData = cast[ptr UncheckedArray[T]](buf.buf)
-    result.contiguousLen = if itemSize > 0: buf.len div itemSize else: 0
+    result.buf = buf
+    result.owner = arr
+    result.shape = shape
+    result.strides = strides
+    result.itemSize = itemSize
+    result.isContiguous = contiguous
+    if contiguous:
+      result.contiguousData = cast[ptr UncheckedArray[T]](buf.buf)
+      result.contiguousLen = if itemSize > 0: buf.len div itemSize else: 0
 
-  when defined(debug):
-    result.initialized = true
+    when defined(debug):
+      result.initialized = true
+  except:
+    if buf.buf != nil:
+      release(buf)
+    raise
 
 proc asStridedArray*[T](arr: PyObject, writable: static bool = false): auto =
-  ## Force strided mode (for multi-dimensional or non-contiguous arrays)
+  ## Request a strided-capable buffer view (works for contiguous arrays too)
   ##
   ## Use this when you know the array is multi-dimensional or want to
   ## explicitly handle strided access patterns.
@@ -447,54 +550,58 @@ proc asStridedArray*[T](arr: PyObject, writable: static bool = false): auto =
   ##
   ##   echo mat[0, 0]  # Multi-dimensional indexing
 
-  when writable:
-    var result: NumpyArrayWrite[T]
-    let mode = PyBUF_WRITE or PyBUF_STRIDED or PyBUF_FORMAT
+  template initArray(resultVar: typed): untyped =
+    let mode = when writable:
+      PyBUF_WRITE or PyBUF_STRIDED or PyBUF_FORMAT
+    else:
+      PyBUF_READ or PyBUF_STRIDED_RO or PyBUF_FORMAT
+
     var buf: RawPyBuffer
     getBuffer(arr, buf, mode.cint)
-    validateDtype[T](buf)
-    let shape = computeShape(buf)
-    let itemSize = getItemSize[T](buf)
-    let strides = computeStrides(buf, shape, itemSize)
-    let contiguous = isCContiguous(shape, strides, itemSize)
+    try:
+      validateDtype[T](buf)
+      let shape = computeShape(buf)
+      let itemSize = getItemSize[T](buf)
+      let strides = computeStrides(buf, shape, itemSize)
+      let contiguous = isCContiguous(shape, strides, itemSize)
 
-    result.buf = buf
-    result.owner = arr
-    result.shape = shape
-    result.strides = strides
-    result.itemSize = itemSize
-    result.isContiguous = contiguous
-    if contiguous:
-      result.contiguousData = cast[ptr UncheckedArray[T]](buf.buf)
-      result.contiguousLen = if itemSize > 0: buf.len div itemSize else: 0
+      resultVar.buf = buf
+      resultVar.owner = arr
+      resultVar.shape = shape
+      resultVar.strides = strides
+      resultVar.itemSize = itemSize
+      resultVar.isContiguous = contiguous
+      if contiguous:
+        resultVar.contiguousData = cast[ptr UncheckedArray[T]](buf.buf)
+        resultVar.contiguousLen = if itemSize > 0: buf.len div itemSize else: 0
 
-    when defined(debug):
-      result.initialized = true
+      when defined(debug):
+        resultVar.initialized = true
+    except:
+      if buf.buf != nil:
+        release(buf)
+      raise
+
+  when writable:
+    var result: NumpyArrayWrite[T]
+    initArray(result)
     return result
   else:
     var result: NumpyArrayRead[T]
-    let mode = PyBUF_READ or PyBUF_STRIDED_RO or PyBUF_FORMAT
-    var buf: RawPyBuffer
-    getBuffer(arr, buf, mode.cint)
-    validateDtype[T](buf)
-    let shape = computeShape(buf)
-    let itemSize = getItemSize[T](buf)
-    let strides = computeStrides(buf, shape, itemSize)
-    let contiguous = isCContiguous(shape, strides, itemSize)
-
-    result.buf = buf
-    result.owner = arr
-    result.shape = shape
-    result.strides = strides
-    result.itemSize = itemSize
-    result.isContiguous = contiguous
-    if contiguous:
-      result.contiguousData = cast[ptr UncheckedArray[T]](buf.buf)
-      result.contiguousLen = if itemSize > 0: buf.len div itemSize else: 0
-
-    when defined(debug):
-      result.initialized = true
+    initArray(result)
     return result
+
+template asNumpyArray*(arr: PyObject, T: typedesc): NumpyArrayRead[T] =
+  ## Backward-compatible typedesc overload.
+  asNumpyArray[T](arr)
+
+template asNumpyArrayWrite*(arr: PyObject, T: typedesc): NumpyArrayWrite[T] =
+  ## Backward-compatible typedesc overload.
+  asNumpyArrayWrite[T](arr)
+
+template asStridedArray*(arr: PyObject, T: typedesc): NumpyArrayRead[T] =
+  ## Backward-compatible typedesc overload.
+  asStridedArray[T](arr)
 
 # =============================================================================
 # Data Access API - Properties
@@ -502,10 +609,10 @@ proc asStridedArray*[T](arr: PyObject, writable: static bool = false): auto =
 
 proc data*[T](arr: NumpyArrayRead[T]): ptr UncheckedArray[T] {.inline.} =
   ## Get raw pointer to array data (for contiguous arrays or use with GIL release)
-  ## Only valid for contiguous arrays
+  ## Only valid for contiguous arrays - raises LayoutError for strided arrays
+  if not arr.isContiguous:
+    raise newException(LayoutError, "Cannot get raw pointer for non-contiguous array")
   when defined(debug):
-    if not arr.isContiguous:
-      raise newException(LayoutError, "Cannot get raw pointer for non-contiguous array")
     if not arr.initialized:
       raise newException(ValueError, "Array not initialized")
 
@@ -513,10 +620,10 @@ proc data*[T](arr: NumpyArrayRead[T]): ptr UncheckedArray[T] {.inline.} =
 
 proc data*[T](arr: NumpyArrayWrite[T]): ptr UncheckedArray[T] {.inline.} =
   ## Get raw pointer to array data (for contiguous arrays or use with GIL release)
-  ## Only valid for contiguous arrays
+  ## Only valid for contiguous arrays - raises LayoutError for strided arrays
+  if not arr.isContiguous:
+    raise newException(LayoutError, "Cannot get raw pointer for non-contiguous array")
   when defined(debug):
-    if not arr.isContiguous:
-      raise newException(LayoutError, "Cannot get raw pointer for non-contiguous array")
     if not arr.initialized:
       raise newException(ValueError, "Array not initialized")
 
@@ -553,44 +660,28 @@ proc shape*[T](arr: NumpyArrayRead[T]): seq[int] {.inline.} =
   when defined(debug):
     if not arr.initialized:
       raise newException(ValueError, "Array not initialized")
-
-  if arr.isContiguous:
-    return arr.shape
-  else:
-    return arr.shape
+  arr.shape
 
 proc shape*[T](arr: NumpyArrayWrite[T]): seq[int] {.inline.} =
   ## Get array dimensions as a sequence
   when defined(debug):
     if not arr.initialized:
       raise newException(ValueError, "Array not initialized")
-
-  if arr.isContiguous:
-    return arr.shape
-  else:
-    return arr.shape
+  arr.shape
 
 proc ndim*[T](arr: NumpyArrayRead[T]): int {.inline.} =
   ## Get number of dimensions
   when defined(debug):
     if not arr.initialized:
       raise newException(ValueError, "Array not initialized")
-
-  if arr.isContiguous:
-    return arr.shape.len
-  else:
-    return arr.shape.len
+  arr.shape.len
 
 proc ndim*[T](arr: NumpyArrayWrite[T]): int {.inline.} =
   ## Get number of dimensions
   when defined(debug):
     if not arr.initialized:
       raise newException(ValueError, "Array not initialized")
-
-  if arr.isContiguous:
-    return arr.shape.len
-  else:
-    return arr.shape.len
+  arr.shape.len
 
 proc size*[T](arr: NumpyArrayRead[T]): int {.inline.} =
   ## Get total element count (alias for len)
@@ -606,9 +697,11 @@ proc size*[T](arr: NumpyArrayWrite[T]): int {.inline.} =
 
 proc `[]`*[T](arr: NumpyArrayRead[T], i: int): T {.inline.} =
   ## Safe indexing for 1D contiguous arrays
+  ## Contiguity and initialization checks are always performed (release safety)
+  ## Bounds checking is debug-only (use with caution in release)
+  if not arr.isContiguous:
+    raise newException(LayoutError, "Use multi-dimensional indexing for non-contiguous arrays")
   when defined(debug):
-    if not arr.isContiguous:
-      raise newException(LayoutError, "Use multi-dimensional indexing for non-contiguous arrays")
     if not arr.initialized:
       raise newException(ValueError, "Array not initialized")
     if i < 0 or i >= arr.contiguousLen:
@@ -618,9 +711,11 @@ proc `[]`*[T](arr: NumpyArrayRead[T], i: int): T {.inline.} =
 
 proc `[]`*[T](arr: NumpyArrayWrite[T], i: int): T {.inline.} =
   ## Safe indexing for 1D contiguous arrays
+  ## Contiguity and initialization checks are always performed (release safety)
+  ## Bounds checking is debug-only (use with caution in release)
+  if not arr.isContiguous:
+    raise newException(LayoutError, "Use multi-dimensional indexing for non-contiguous arrays")
   when defined(debug):
-    if not arr.isContiguous:
-      raise newException(LayoutError, "Use multi-dimensional indexing for non-contiguous arrays")
     if not arr.initialized:
       raise newException(ValueError, "Array not initialized")
     if i < 0 or i >= arr.contiguousLen:
@@ -630,9 +725,11 @@ proc `[]`*[T](arr: NumpyArrayWrite[T], i: int): T {.inline.} =
 
 proc `[]=`*[T](arr: NumpyArrayWrite[T], i: int, val: T) {.inline.} =
   ## Safe element assignment for 1D contiguous arrays
+  ## Contiguity and initialization checks are always performed (release safety)
+  ## Bounds checking is debug-only (use with caution in release)
+  if not arr.isContiguous:
+    raise newException(LayoutError, "Use multi-dimensional indexing for non-contiguous arrays")
   when defined(debug):
-    if not arr.isContiguous:
-      raise newException(LayoutError, "Use multi-dimensional indexing for non-contiguous arrays")
     if not arr.initialized:
       raise newException(ValueError, "Array not initialized")
     if i < 0 or i >= arr.contiguousLen:
@@ -653,17 +750,17 @@ proc `[]`*[T](arr: NumpyArrayRead[T], indices: varargs[int]): T {.inline.} =
   ##   echo mat[0, 0]  # First row, first column
   ##   echo mat[1, 2]  # Second row, third column
 
+  let ndim = arr.shape.len
+
+  # Dimension check is always performed (release safety)
+  if ndim == 0 and indices.len != 0:
+    raise newException(DimensionError, "Expected 0 indices for scalar array, got " & $indices.len)
+  if ndim > 0 and indices.len != ndim:
+    raise newException(DimensionError, "Expected " & $ndim & " indices, got " & $indices.len)
+
   when defined(debug):
     if not arr.initialized:
       raise newException(ValueError, "Array not initialized")
-
-  let ndim = arr.shape.len
-
-  when defined(debug):
-    if ndim == 0 and indices.len != 0:
-      raise newException(DimensionError, "Expected 0 indices for scalar array, got " & $indices.len)
-    if ndim > 0 and indices.len != ndim:
-      raise newException(DimensionError, "Expected " & $ndim & " indices, got " & $indices.len)
 
   # Calculate offset using strides (converted to element units)
   var offset = 0
@@ -674,7 +771,7 @@ proc `[]`*[T](arr: NumpyArrayRead[T], indices: varargs[int]): T {.inline.} =
       if idx < 0 or idx >= arr.shape[i]:
         raise newException(IndexError, "Index " & $idx & " out of bounds for dimension " & $i & " [0, " & $arr.shape[i] & ")")
 
-    let strideElements = arr.strides[i] div arr.itemSize
+    let strideElements = getStrideElements(arr.strides[i], arr.itemSize, i)
     offset += idx * strideElements
 
   let buf = cast[ptr UncheckedArray[T]](arr.buf.buf)
@@ -682,17 +779,17 @@ proc `[]`*[T](arr: NumpyArrayRead[T], indices: varargs[int]): T {.inline.} =
 
 proc `[]`*[T](arr: NumpyArrayWrite[T], indices: varargs[int]): T {.inline.} =
   ## Multi-dimensional indexing for strided arrays
+  let ndim = arr.shape.len
+
+  # Dimension check is always performed (release safety)
+  if ndim == 0 and indices.len != 0:
+    raise newException(DimensionError, "Expected 0 indices for scalar array, got " & $indices.len)
+  if ndim > 0 and indices.len != ndim:
+    raise newException(DimensionError, "Expected " & $ndim & " indices, got " & $indices.len)
+
   when defined(debug):
     if not arr.initialized:
       raise newException(ValueError, "Array not initialized")
-
-  let ndim = arr.shape.len
-
-  when defined(debug):
-    if ndim == 0 and indices.len != 0:
-      raise newException(DimensionError, "Expected 0 indices for scalar array, got " & $indices.len)
-    if ndim > 0 and indices.len != ndim:
-      raise newException(DimensionError, "Expected " & $ndim & " indices, got " & $indices.len)
 
   var offset = 0
   for i in 0..<ndim:
@@ -702,7 +799,7 @@ proc `[]`*[T](arr: NumpyArrayWrite[T], indices: varargs[int]): T {.inline.} =
       if idx < 0 or idx >= arr.shape[i]:
         raise newException(IndexError, "Index " & $idx & " out of bounds for dimension " & $i & " [0, " & $arr.shape[i] & ")")
 
-    let strideElements = arr.strides[i] div arr.itemSize
+    let strideElements = getStrideElements(arr.strides[i], arr.itemSize, i)
     offset += idx * strideElements
 
   let buf = cast[ptr UncheckedArray[T]](arr.buf.buf)
@@ -710,17 +807,17 @@ proc `[]`*[T](arr: NumpyArrayWrite[T], indices: varargs[int]): T {.inline.} =
 
 proc `[]=`*[T](arr: NumpyArrayWrite[T], indices: varargs[int], val: T) {.inline.} =
   ## Multi-dimensional element assignment for strided arrays
+  let ndim = arr.shape.len
+
+  # Dimension check is always performed (release safety)
+  if ndim == 0 and indices.len != 0:
+    raise newException(DimensionError, "Expected 0 indices for scalar array, got " & $indices.len)
+  if ndim > 0 and indices.len != ndim:
+    raise newException(DimensionError, "Expected " & $ndim & " indices, got " & $indices.len)
+
   when defined(debug):
     if not arr.initialized:
       raise newException(ValueError, "Array not initialized")
-
-  let ndim = arr.shape.len
-
-  when defined(debug):
-    if ndim == 0 and indices.len != 0:
-      raise newException(DimensionError, "Expected 0 indices for scalar array, got " & $indices.len)
-    if ndim > 0 and indices.len != ndim:
-      raise newException(DimensionError, "Expected " & $ndim & " indices, got " & $indices.len)
 
   var offset = 0
   for i in 0..<ndim:
@@ -730,7 +827,7 @@ proc `[]=`*[T](arr: NumpyArrayWrite[T], indices: varargs[int], val: T) {.inline.
       if idx < 0 or idx >= arr.shape[i]:
         raise newException(IndexError, "Index " & $idx & " out of bounds for dimension " & $i & " [0, " & $arr.shape[i] & ")")
 
-    let strideElements = arr.strides[i] div arr.itemSize
+    let strideElements = getStrideElements(arr.strides[i], arr.itemSize, i)
     offset += idx * strideElements
 
   let buf = cast[ptr UncheckedArray[T]](arr.buf.buf)
@@ -760,7 +857,7 @@ iterator items*[T](arr: NumpyArrayRead[T]): T =
       # Calculate offset for current element position
       var offset = 0
       for i in 0..<ndim:
-        let strideElements = arr.strides[i] div arr.itemSize
+        let strideElements = getStrideElements(arr.strides[i], arr.itemSize, i)
         offset += indices[i] * strideElements
 
       let buf = cast[ptr UncheckedArray[T]](arr.buf.buf)
@@ -795,7 +892,7 @@ iterator items*[T](arr: NumpyArrayWrite[T]): T =
       # Calculate offset for current element position
       var offset = 0
       for i in 0..<ndim:
-        let strideElements = arr.strides[i] div arr.itemSize
+        let strideElements = getStrideElements(arr.strides[i], arr.itemSize, i)
         offset += indices[i] * strideElements
 
       let buf = cast[ptr UncheckedArray[T]](arr.buf.buf)
@@ -829,7 +926,7 @@ iterator mitems*[T](arr: NumpyArrayWrite[T]): var T =
       let offset = block:
         var off = 0
         for i in 0..<ndim:
-          let strideElements = arr.strides[i] div arr.itemSize
+          let strideElements = getStrideElements(arr.strides[i], arr.itemSize, i)
           off += indices[i] * strideElements
         off
 
@@ -864,11 +961,14 @@ iterator pairs*[T](arr: NumpyArrayRead[T]): tuple[idx: seq[int], val: T] =
       # Calculate offset for current element position
       var offset = 0
       for i in 0..<ndim:
-        let strideElements = arr.strides[i] div arr.itemSize
+        let strideElements = getStrideElements(arr.strides[i], arr.itemSize, i)
         offset += indices[i] * strideElements
 
       let buf = cast[ptr UncheckedArray[T]](arr.buf.buf)
-      yield (indices, buf[offset])
+      var idxCopy = newSeq[int](indices.len)
+      for i in 0..<indices.len:
+        idxCopy[i] = indices[i]
+      yield (idxCopy, buf[offset])
 
       var carry = 1
       for i in countdown(ndim - 1, 0):
@@ -891,10 +991,11 @@ template toOpenArray*[T](arr: NumpyArrayRead[T]): openArray[T] =
       raise newException(ValueError, "Array not initialized")
   if not arr.isContiguous or arr.shape.len != 1:
     raise newException(LayoutError, "Cannot create openArray from non-1D contiguous array")
-  if arr.contiguousLen == 0:
-    toOpenArray(arr.contiguousData, 0, -1)
-  else:
-    toOpenArray(arr.contiguousData, 0, arr.contiguousLen - 1)
+  block:
+    if arr.contiguousLen == 0:
+      toOpenArray(arr.contiguousData, 0, -1)
+    else:
+      toOpenArray(arr.contiguousData, 0, arr.contiguousLen - 1)
 
 template toOpenArray*[T](arr: NumpyArrayWrite[T]): openArray[T] =
   ## Zero-copy view for 1D contiguous arrays compatible with std algorithms
@@ -903,10 +1004,11 @@ template toOpenArray*[T](arr: NumpyArrayWrite[T]): openArray[T] =
       raise newException(ValueError, "Array not initialized")
   if not arr.isContiguous or arr.shape.len != 1:
     raise newException(LayoutError, "Cannot create openArray from non-1D contiguous array")
-  if arr.contiguousLen == 0:
-    toOpenArray(arr.contiguousData, 0, -1)
-  else:
-    toOpenArray(arr.contiguousData, 0, arr.contiguousLen - 1)
+  block:
+    if arr.contiguousLen == 0:
+      toOpenArray(arr.contiguousData, 0, -1)
+    else:
+      toOpenArray(arr.contiguousData, 0, arr.contiguousLen - 1)
 
 proc toSeq*[T](arr: NumpyArrayRead[T]): seq[T] =
   ## Convert array to Nim sequence (copies data)

@@ -15,3 +15,5 @@ requires "nimpy >= 0.2.0"
 
 task test, "Run all tests":
   exec "nim c -r --path:src tests/test_numpy.nim"
+  exec "nim c -r --path:src tests/test_minimal.nim"
+  exec "nim c -r --path:src tests/test_simple.nim"
